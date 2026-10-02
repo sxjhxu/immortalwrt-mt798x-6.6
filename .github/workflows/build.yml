@@ -1,0 +1,86 @@
+name: Build ImmortalWrt MT798x
+
+# 手动触发：仓库 Actions 页面 → 左侧选中 "Build ImmortalWrt MT798x" → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 设备配置（defconfig/ 目录下的文件名）
+        required: true
+        type: choice
+        default: mt7981-ax3000.config
+        options:
+          - mt7981-ax3000.config
+          - mt7981-ax3000_dae.config
+          - mt7981-nowifi.config
+          - mt7986-ax6000.config
+          - mt7986-ax6000_dae.config
+          - mt7986-nowifi.config
+          - mt7986-ax4200-bpir3_mini.config
+          - mt7975-ipailna-high-power.config
+          - mt7975-ipailna-high-power_dae.config
+      publish_release:
+        description: 编译完成后发布 GitHub Release（长期可下载）
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译 ${{ inputs.defconfig }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 540
+    steps:
+      - name: 检查磁盘空间
+        run: df -h /
+
+      - name: 检出源码（全量 clone，保证固件版本号正确）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装编译依赖
+        run: |
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)' || {
+            sudo apt-get update -y
+            sudo apt-get install -y build-essential clang flex bison gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-ply python3-docutils rsync swig unzip zlib1g-dev file wget curl patch bzip2 libtool autoconf automake pkg-config device-tree-compiler
+          }
+
+      - name: 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 写入设备配置
+        run: |
+          cp -f defconfig/${{ inputs.defconfig }} .config
+          make defconfig
+
+      - name: 编译固件（首次全量约 3~6 小时）
+        run: make -j$(nproc)
+
+      - name: 整理固件产物
+        run: |
+          mkdir -p release
+          find bin/targets -type f \( -iname '*.bin' -o -iname '*.itb' -o -iname '*.tar' -o -iname '*.gz' -o -iname 'sha256sums' -o -iname '*.manifest' \) -exec cp --parents {} release/ \;
+          echo "==== 固件文件 ===="
+          find release -type f -exec ls -lh {} \;
+
+      - name: 上传固件（Artifacts，90 天有效）
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ inputs.defconfig }}
+          path: release/
+          if-no-files-found: error
+
+      - name: 发布 GitHub Release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ inputs.defconfig }}-${{ github.run_number }}
+          name: ImmortalWrt ${{ inputs.defconfig }} (run #${{ github.run_number }})
+          files: release/**
+          fail_on_unmatched_files: true
